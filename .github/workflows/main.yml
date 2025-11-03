@@ -25,27 +25,10 @@ jobs:
     
     - name: Build EXE with PyInstaller
       run: |
-        pyinstaller --onefile --windowed --name "PDFOrderConverter" src/pdf_converter.py
+        pyinstaller --onefile --windowed --name "PDFOrderConverter" pdf_converter.py
     
     - name: Upload EXE artifact
       uses: actions/upload-artifact@v4
       with:
         name: PDFOrderConverter
         path: dist/PDFOrderConverter.exe
-    
-    - name: Create Release
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-      uses: softprops/action-gh-release@v1
-      with:
-        files: dist/PDFOrderConverter.exe
-        tag_name: latest
-        name: Latest Build
-        body: |
-          Automatic build of PDF Order Converter
-          
-          ## Features:
-          - Convert PDF purchase orders to Excel
-          - Automatic code conversion
-          - GUI interface
-        draft: false
-        prerelease: false
