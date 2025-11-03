@@ -23,7 +23,7 @@ class PDFToExcelConverter:
             return False
     
     def extract_data_from_pdf(self, pdf_path):
-        """Estrae i dati dal PDF usando un approccio ibrido"""
+        """Estrae i dati dal PDF con parser migliorato"""
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 all_text = ""
@@ -31,13 +31,14 @@ class PDFToExcelConverter:
                     text = page.extract_text()
                     if text:
                         all_text += text + "\n"
-                return self.advanced_text_parser(all_text, pdf_path)
+                
+                return self.smart_table_parser(all_text, pdf_path)
         except Exception as e:
             print(f"Errore nell'estrazione dal PDF: {e}")
             return None
     
-    def advanced_text_parser(self, text, pdf_path):
-        """Parser avanzato per diversi formati di PDF"""
+    def smart_table_parser(self, text, pdf_path):
+        """Parser intelligente che cerca tabelle in diversi formati"""
         data = {
             'po_number': '',
             'po_date': '',
@@ -60,143 +61,209 @@ class PDFToExcelConverter:
         
         print(f"Analizzando ordine {data['po_number']}...")
         
-        # MULTIPLE STRATEGIES FOR TABLE EXTRACTION
-        items_method1 = self.extract_with_regex_patterns(text)
-        items_method2 = self.extract_with_line_parsing(text)
+        # CERCA LA TABELLA DEGLI ARTICOLI
+        items = []
         
-        # Usa il metodo che trova più articoli
-        if len(items_method1) >= len(items_method2):
-            data['items'] = items_method1
-            print(f"Trovati {len(items_method1)} articoli con metodo regex")
-        else:
-            data['items'] = items_method2
-            print(f"Trovati {len(items_method2)} articoli con metodo line parsing")
+        # Metodo 1: Cerca blocchi di articoli completi
+        item_blocks = self.find_item_blocks(text)
+        for block in item_blocks:
+            item = self.parse_item_block(block)
+            if item and item['customer_code']:
+                items.append(item)
+        
+        # Metodo 2: Se il primo metodo non trova abbastanza articoli
+        if len(items) < 3:
+            items = self.alternative_parsing(text)
+        
+        data['items'] = items
+        print(f"Trovati {len(items)} articoli")
         
         return data
     
-    def extract_with_regex_patterns(self, text):
-        """Estrazione usando pattern regex specifici"""
-        items = []
-        
-        # Pattern per righe complete: *codice descrizione quantità UOM prezzo VAT totale
-        complete_pattern = r'(\*\d+\w*)\s+(.*?)\s+(\d+)\s+([^\s€]+)\s+€([\d,]+)\s+€([\d,]+)\s+€([\d\s,]+)'
-        matches = re.findall(complete_pattern, text)
-        
-        for match in matches:
-            item = {
-                'customer_code': match[0],
-                'description': match[1].strip(),
-                'quantity': match[2],
-                'uom': match[3].strip(),
-                'price_excl': match[4],
-                'vat': match[5],
-                'total_incl': match[6]
-            }
-            items.append(item)
-        
-        return items
-    
-    def extract_with_line_parsing(self, text):
-        """Estrazione analizzando riga per riga"""
-        items = []
+    def find_item_blocks(self, text):
+        """Trova blocchi completi di articoli nel testo"""
+        blocks = []
         lines = text.split('\n')
-        i = 0
         
+        i = 0
         while i < len(lines):
             line = lines[i].strip()
             
+            # Se troviamo una riga che inizia con codice articolo
             if line.startswith('*'):
-                item = {'customer_code': '', 'description': '', 'quantity': '', 'uom': ''}
+                block = {
+                    'code_line': line,
+                    'data_lines': []
+                }
                 
-                # Estrai codice cliente
-                code_match = re.match(r'(\*\d+\w*)\s+(.*)', line)
-                if code_match:
-                    item['customer_code'] = code_match.group(1)
-                    remaining_text = code_match.group(2)
-                    
-                    # Cerca di estrarre tutti i dati dalla stessa riga
-                    same_line_match = re.search(r'(.+?)\s+(\d+)\s+([^\s€]+)\s+€', remaining_text)
-                    if same_line_match:
-                        item['description'] = same_line_match.group(1).strip()
-                        item['quantity'] = same_line_match.group(2)
-                        item['uom'] = same_line_match.group(3)
-                    else:
-                        # Se non trova nella stessa riga, cerca nelle successive
-                        item['description'] = remaining_text.strip()
-                        j = i + 1
-                        while j < min(i + 3, len(lines)):
-                            next_line = lines[j].strip()
-                            if re.match(r'^\d+\s+', next_line):
-                                data_match = re.match(r'(\d+)\s+([^\s€]+)\s+€', next_line)
-                                if data_match:
-                                    item['quantity'] = data_match.group(1)
-                                    item['uom'] = data_match.group(2)
-                                    break
-                            j += 1
+                # Cerca le righe dati successive (max 2 righe)
+                for j in range(1, 3):
+                    if i + j < len(lines):
+                        next_line = lines[i + j].strip()
+                        # Se è una riga dati (contiene numeri e prezzi)
+                        if self.is_data_line(next_line):
+                            block['data_lines'].append(next_line)
+                        else:
+                            break
                 
-                if item['customer_code']:
-                    items.append(item)
+                if block['data_lines']:
+                    blocks.append(block)
+                    i += len(block['data_lines'])  # Salta le righe già processate
             
             i += 1
         
+        return blocks
+    
+    def is_data_line(self, line):
+        """Determina se una riga contiene dati dell'articolo"""
+        # Una riga dati tipicamente contiene: quantità UOM prezzo
+        patterns = [
+            r'^\d+\s+[^\s€]+\s+€',  # quantità UOM €prezzo
+            r'^\d+\s+[^\s€]+\s+[^\s€]+\s+€',  # quantità UOM qualcosaltro €prezzo
+            r'\d+\s+[^\s€]+\s+\d+[,.]\d+'  # quantità UOM numero,numero
+        ]
+        
+        return any(re.search(pattern, line) for pattern in patterns)
+    
+    def parse_item_block(self, block):
+        """Analizza un blocco articolo completo"""
+        item = {'customer_code': '', 'description': '', 'quantity': '', 'uom': ''}
+        
+        # Estrai dalla riga codice
+        code_line = block['code_line']
+        code_match = re.match(r'(\*\d+\w*)\s+(.*)', code_line)
+        if code_match:
+            item['customer_code'] = code_match.group(1)
+            item['description'] = code_match.group(2).strip()
+        
+        # Estrai dalla prima riga dati
+        if block['data_lines']:
+            data_line = block['data_lines'][0]
+            
+            # Pattern 1: quantità UOM prezzo
+            pattern1 = r'^(\d+)\s+([^\s€]+)\s+€'
+            match1 = re.search(pattern1, data_line)
+            if match1:
+                item['quantity'] = match1.group(1)
+                item['uom'] = match1.group(2)
+            else:
+                # Pattern 2: quantità UOM (senza €)
+                pattern2 = r'^(\d+)\s+([^\s]+)'
+                match2 = re.search(pattern2, data_line)
+                if match2:
+                    item['quantity'] = match2.group(1)
+                    item['uom'] = match2.group(2)
+            
+            # Pulisci la descrizione da eventuali dati rimasti
+            item['description'] = self.clean_description(item['description'], item.get('quantity', ''))
+        
+        return item
+    
+    def alternative_parsing(self, text):
+        """Metodo alternativo di parsing per PDF difficili"""
+        items = []
+        lines = text.split('\n')
+        
+        # Cerca sezioni che contengono la tabella articoli
+        table_section = self.extract_table_section(lines)
+        
+        for line in table_section:
+            line = line.strip()
+            if line.startswith('*'):
+                # Prova diversi pattern per estrarre i dati
+                item = self.try_multiple_patterns(line)
+                if item and item['customer_code']:
+                    items.append(item)
+        
         return items
     
-    def manual_fix_quantities(self, order_data):
-        """Correzione manuale delle quantità basata sui PDF analizzati"""
-        # Mappa delle quantità corrette per PO 71525
-        correct_quantities_71525 = {
-            '*272215': '24',    # Juice Liter Apple 5% VAT
-            '*272220': '2',     # Juice Liter Orange 5% VAT
-            '*272210': '2',     # Juice Cappy Apple 33CL
-            '*272211': '2',     # Juice Cappy Orange 33CL
-            '*274071': '6',     # GSD PET 50cl Coke
-            '*274075': '3',     # GSD PET 50cl Fanta Orange
-            '*274077': '5',     # GSD PET 50cl Sprite
-            '*274202': '2',     # Ice Tea Lemon PET 150cl
-            '*274206': '4',     # Ice Tea Peach PET 150cl
-        }
+    def extract_table_section(self, lines):
+        """Estrae la sezione della tabella articoli"""
+        start_idx = -1
+        end_idx = len(lines)
         
-        # Mappa delle quantità corrette per PO 71732
-        correct_quantities_71732 = {
-            '*275104': '450',   # Water Kristal Still PET 50d
-            '*274205': '15',    # Ice Tea Peach PET 050d
-            '*274209': '5',     # Powerade Mountain Blast
-            '*274106': '6',     # Powerade Gusto Limone
-            '*274071': '30',    # GSD PET 50d Coke
-            '*274072': '45',    # GSD PET 50d Coke Zero
-            '*274077': '6',     # GSD PET 50d Sprite
-            '*274078': '4',     # GSD PET 50d Sprite Zero
-            '*274075': '12',    # GSD PET 50d Fanta Orange
-            '*272211': '10',    # Juice Cappy Orange 33CL
-            '*272110': '6',     # Juice Cappy Multvitamin 33CL
-            '*272210': '6',     # Juice Cappy Apple 33CL
-            '*272111': '6',     # Juice Cappy Peach 33CL
-            '*102036': '1',     # Beer SOL Glass 33cl
-            '*274079': '4',     # GSD PET 50cl Tonic Water
-        }
+        # Trova inizio tabella (dopo l'header)
+        for i, line in enumerate(lines):
+            if 'Item Code' in line and 'Item Description' in line:
+                start_idx = i + 1
+                break
         
-        # Applica le correzioni in base al PO number
-        if order_data['po_number'] == '71525':
-            quantity_map = correct_quantities_71525
-        elif order_data['po_number'] == '71732':
-            quantity_map = correct_quantities_71732
-        else:
-            return order_data
+        # Trova fine tabella (prima dei totali)
+        for i in range(start_idx, len(lines)):
+            if any(x in lines[i] for x in ['Total', 'Delivery to:', 'Note:']):
+                end_idx = i
+                break
         
-        # Correggi le quantità
-        corrected_count = 0
-        for item in order_data['items']:
-            correct_qty = quantity_map.get(item['customer_code'])
-            if correct_qty and item['quantity'] != correct_qty:
-                old_qty = item['quantity']
-                item['quantity'] = correct_qty
-                corrected_count += 1
-                print(f"  Correzione quantità: {item['customer_code']} da '{old_qty}' a '{correct_qty}'")
+        return lines[start_idx:end_idx] if start_idx != -1 else lines
+    
+    def try_multiple_patterns(self, line):
+        """Prova diversi pattern per estrarre i dati - VERSIONE CORRETTA"""
+        item = {'customer_code': '', 'description': '', 'quantity': '', 'uom': ''}
         
-        if corrected_count > 0:
-            print(f"  Applicate {corrected_count} correzioni quantità")
+        # PATTERN 1 MIGLIORATO: *codice descrizione quantità confezione prezzo...
+        # Cerca: *codice descrizione QUANTITÀ confezione €prezzo
+        pattern1 = r'(\*\d+\w*)\s+(.*?)\s+(\d+)\s+(\d+\s*x\s*\d+[^\s€]*)\s+€'
+        match1 = re.search(pattern1, line)
+        if match1:
+            item['customer_code'] = match1.group(1)
+            item['description'] = match1.group(2).strip()
+            item['quantity'] = match1.group(3)  # QUANTITÀ dopo la descrizione
+            item['uom'] = match1.group(4)       # Confezione (12 x 75cl)
+            print(f"  Pattern1 - Trovato: {item['customer_code']} Qty: {item['quantity']} UOM: {item['uom']}")
+            return item
         
-        return order_data
+        # PATTERN 2: *codice descrizione quantità UOM semplice prezzo...
+        pattern2 = r'(\*\d+\w*)\s+(.*?)\s+(\d+)\s+([^\s€]+)\s+€'
+        match2 = re.search(pattern2, line)
+        if match2:
+            item['customer_code'] = match2.group(1)
+            item['description'] = match2.group(2).strip()
+            item['quantity'] = match2.group(3)
+            item['uom'] = match2.group(4)
+            print(f"  Pattern2 - Trovato: {item['customer_code']} Qty: {item['quantity']} UOM: {item['uom']}")
+            return item
+        
+        # PATTERN 3: Cerca quantità nella stessa riga dopo la descrizione
+        pattern3 = r'(\*\d+\w*)\s+(.*?)\s+(\d+)\s+'
+        match3 = re.search(pattern3, line)
+        if match3:
+            item['customer_code'] = match3.group(1)
+            remaining_text = match3.group(2) + " " + line[match3.end():]
+            item['quantity'] = match3.group(3)
+            
+            # Cerca UOM dopo la quantità
+            uom_match = re.search(r'\d+\s+([^\s€]+)\s+', remaining_text)
+            if uom_match:
+                item['uom'] = uom_match.group(1)
+                item['description'] = re.sub(r'\s*\d+\s+[^\s€]+\s+.*', '', match3.group(2)).strip()
+            else:
+                item['description'] = match3.group(2).strip()
+            
+            print(f"  Pattern3 - Trovato: {item['customer_code']} Qty: {item['quantity']} UOM: {item['uom']}")
+            return item
+        
+        # PATTERN 4: Solo codice e descrizione (fallback)
+        pattern4 = r'(\*\d+\w*)\s+(.*)'
+        match4 = re.search(pattern4, line)
+        if match4:
+            item['customer_code'] = match4.group(1)
+            item['description'] = match4.group(2).strip()
+            print(f"  Pattern4 - Solo codice: {item['customer_code']} (quantità non trovata)")
+        
+        return item
+    
+    def clean_description(self, description, quantity):
+        """Pulisce la descrizione rimuovendo dati numerici"""
+        if not quantity:
+            return description.strip()
+        
+        # Rimuovi la quantità e tutto ciò che segue se presente
+        pattern = r'(.+?)\s*' + re.escape(quantity) + r'.*'
+        match = re.match(pattern, description)
+        if match:
+            return match.group(1).strip()
+        
+        return description.strip()
     
     def convert_to_internal_codes(self, order_data):
         """Converte i codici cliente in codici interni"""
@@ -221,7 +288,6 @@ class PDFToExcelConverter:
         """Crea il file Excel di output"""
         try:
             with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-                # Crea il dataframe principale
                 df_data = []
                 for item in converted_items:
                     df_data.append({
@@ -233,25 +299,19 @@ class PDFToExcelConverter:
                     })
                 
                 df = pd.DataFrame(df_data)
-                
-                # Scrivi il dataframe
                 df.to_excel(writer, sheet_name='Ordine', index=False, startrow=4)
                 
-                # Ottieni il workbook e il worksheet
                 workbook = writer.book
                 worksheet = writer.sheets['Ordine']
                 
-                # Aggiungi l'intestazione con i dati dell'ordine
                 worksheet['A1'] = f"Numero Ordine: {order_data['po_number']}"
                 worksheet['A2'] = f"Data Ordine: {order_data['po_date']}"
                 worksheet['A3'] = f"Data Consegna: {order_data['delivery_date']}"
                 
-                # Formatta le colonne
                 column_widths = {'A': 15, 'B': 12, 'C': 40, 'D': 15, 'E': 10}
                 for col, width in column_widths.items():
                     worksheet.column_dimensions[col].width = width
                 
-                # Applica il grassetto ai codici NEW
                 for row in range(5, len(converted_items) + 5):
                     cell_value = worksheet[f'A{row}'].value
                     if cell_value == "**NEW**":
@@ -269,29 +329,20 @@ class PDFToExcelConverter:
         if output_dir is None:
             output_dir = os.path.dirname(pdf_path)
         
-        # Carica il database di conversione
         if not self.load_conversion_db(conversion_db_path):
             return False
         
-        # Estrai dati dal PDF
         order_data = self.extract_data_from_pdf(pdf_path)
         if not order_data or not order_data['items']:
             print("Nessun dato estratto dal PDF")
             return False
         
         print(f"Trovati {len(order_data['items'])} articoli nell'ordine {order_data['po_number']}")
-        
-        # Mostra cosa è stato estratto
         for i, item in enumerate(order_data['items'], 1):
-            print(f"  {i}. {item['customer_code']} - Qty: {item.get('quantity', 'N/A')} - Desc: {item.get('description', '')[:30]}...")
+            print(f"  {i}. {item['customer_code']} - Qty: {item.get('quantity', 'N/A')} - UOM: {item.get('uom', 'N/A')}")
         
-        # Applica correzioni manuali alle quantità
-        order_data = self.manual_fix_quantities(order_data)
-        
-        # Converti i codici
         converted_items = self.convert_to_internal_codes(order_data)
         
-        # Crea il file di output
         pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
         output_path = os.path.join(output_dir, f"{pdf_name}_converted.xlsx")
         
@@ -299,7 +350,6 @@ class PDFToExcelConverter:
         
         if success:
             print(f"Conversione completata: {output_path}")
-            # Conta i nuovi codici
             new_codes = sum(1 for item in converted_items if item['internal_code'] == "**NEW**")
             if new_codes > 0:
                 print(f"ATTENZIONE: {new_codes} codici senza corrispondenza trovati")
@@ -307,7 +357,6 @@ class PDFToExcelConverter:
         return success
 
 def main():
-    """Funzione principale con interfaccia grafica"""
     converter = PDFToExcelConverter()
     
     root = tk.Tk()
@@ -316,43 +365,35 @@ def main():
     print("=== CONVERTITORE PDF ORDINI FORNITORI ===")
     print("Seleziona il file DB CONVERSION.xlsx")
     
-    # Seleziona il file di conversione
     conversion_file = filedialog.askopenfilename(
         title="Seleziona il file DB CONVERSION.xlsx",
         filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
     )
     
     if not conversion_file:
-        print("Nessun file di conversione selezionato")
         return
     
     print("Seleziona i file PDF degli ordini da convertire")
-    
-    # Seleziona i file PDF
     pdf_files = filedialog.askopenfilenames(
         title="Seleziona i file PDF degli ordini",
         filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")]
     )
     
     if not pdf_files:
-        print("Nessun file PDF selezionato")
         return
     
-    # Seleziona la cartella di output
     output_dir = filedialog.askdirectory(title="Seleziona la cartella di output")
     if not output_dir:
         output_dir = os.path.dirname(pdf_files[0])
     
-    # Processa ogni file PDF
     success_count = 0
     for pdf_file in pdf_files:
         print(f"\nElaborando: {os.path.basename(pdf_file)}")
         if converter.process_single_pdf(pdf_file, conversion_file, output_dir):
             success_count += 1
     
-    print(f"\n=== CONVERSIONE COMPLETADA ===")
+    print(f"\n=== CONVERSIONE COMPLETATA ===")
     print(f"File elaborati con successo: {success_count}/{len(pdf_files)}")
-    print(f"File di output salvati in: {output_dir}")
     
     messagebox.showinfo("Conversione Completata", 
                        f"Elaborati {success_count}/{len(pdf_files)} file.\n"
