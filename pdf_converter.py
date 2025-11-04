@@ -32,20 +32,13 @@ class PDFToExcelConverter:
                     if text:
                         all_text += text + "\n"
                 
-                # SALVA IL TESTO ESTRATTO PER DEBUG
-                debug_file = pdf_path.replace('.pdf', '_debug.txt')
-                with open(debug_file, 'w', encoding='utf-8') as f:
-                    f.write("=== TESTO ESTRATTO DAL PDF ===\n")
-                    f.write(all_text)
-                print(f"Testo estratto salvato in: {debug_file}")
-                
                 return self.smart_table_parser(all_text, pdf_path)
         except Exception as e:
             print(f"Errore nell'estrazione dal PDF: {e}")
             return None
     
     def smart_table_parser(self, text, pdf_path):
-        """Parser intelligente per diversi formati"""
+        """Parser semplificato per formato tabellare"""
         data = {
             'po_number': '',
             'po_date': '',
@@ -69,79 +62,56 @@ class PDFToExcelConverter:
         
         print(f"Analizzando ordine {data['po_number']}...")
         
-        # Prova diversi metodi di estrazione
-        items = self.extract_items_robust(text)
+        # Estrai articoli con metodo semplificato
+        items = self.extract_items_from_text_simple(text)
         data['items'] = items
         
         print(f"Trovati {len(items)} articoli")
         return data
     
-    def extract_items_robust(self, text):
-        """Metodo robusto per estrarre articoli"""
+    def extract_items_from_text_simple(self, text):
+        """Estrae articoli con metodo semplice e affidabile - VERSIONE MIGLIORATA"""
         items = []
         lines = text.split('\n')
         
-        print("=== ANALISI RIGHE ===")
-        for i, line in enumerate(lines):
+        for line in lines:
             line = line.strip()
-            if not line:
+            
+            # Salta righe non rilevanti
+            if (not line or 
+                line.startswith('Codice') or 
+                line.startswith('Item Code') or
+                'Descrizione' in line or
+                'QTY' in line or
+                'Total' in line or
+                'Delivery' in line or
+                'Note:' in line):
                 continue
                 
-            print(f"Riga {i}: {line}")
+            # Dividi per 2+ spazi
+            columns = re.split(r'\s{2,}', line)
             
-            # Cerca righe che sembrano articoli
-            if self.looks_like_item_line(line):
-                item = self.parse_item_line_robust(line)
-                if item and item['customer_code']:
+            # Deve avere almeno 4 colonne: Codice, Descrizione, QTY, UOM
+            if len(columns) >= 4:
+                # Prendi solo le prime 4 colonne
+                code_col = columns[0].strip()
+                desc_col = columns[1].strip()
+                qty_col = columns[2].strip()
+                uom_col = columns[3].strip()
+                
+                # Verifica che la quantità sia numerica e il codice sia valido
+                # MODIFICA: Accetta anche "12" come quantità (per GSD CO2)
+                if (qty_col.isdigit() or qty_col == '12') and (code_col.isdigit() or code_col.startswith('*')):
+                    item = {
+                        'customer_code': f"*{code_col}" if not code_col.startswith('*') else code_col,
+                        'description': desc_col,
+                        'quantity': qty_col,
+                        'uom': uom_col
+                    }
                     items.append(item)
-                    print(f"  ✓ Articolo trovato: {item['customer_code']} - Qty: {item['quantity']}")
+                    print(f"  Articolo: {item['customer_code']} - Qty: {item['quantity']} - UOM: {item['uom']}")
         
         return items
-    
-    def looks_like_item_line(self, line):
-        """Determina se una riga sembra un articolo"""
-        # Controlla se contiene un codice articolo
-        if re.search(r'\*\d+', line):
-            return True
-        
-        # Controlla se contiene pattern tipici di articoli
-        patterns = [
-            r'\d+\s+[^\s]+\s+€',  # quantità UOM €prezzo
-            r'\d+\s+\d+',         # quantità numero
-            r'\d+\s+[^\s]+\s+[^\s]+\s+€'  # quantità UOM qualcosa €prezzo
-        ]
-        
-        return any(re.search(pattern, line) for pattern in patterns)
-    
-    def parse_item_line_robust(self, line):
-        """Parser robusto per righe articolo"""
-        item = {'customer_code': '', 'description': '', 'quantity': '', 'uom': ''}
-        
-        # Cerca codice articolo
-        code_match = re.search(r'(\*\d+\w*)', line)
-        if code_match:
-            item['customer_code'] = code_match.group(1)
-            # Rimuovi il codice dalla riga per analizzare il resto
-            line = line[code_match.end():].strip()
-        
-        # Cerca quantità (primo numero dopo il codice/descrizione)
-        qty_match = re.search(r'(\d+)\s+([^\s€]+)', line)
-        if qty_match:
-            item['quantity'] = qty_match.group(1)
-            item['uom'] = qty_match.group(2)
-            
-            # La descrizione è tutto prima della quantità
-            desc_end = line.find(qty_match.group(0))
-            if desc_end > 0:
-                item['description'] = line[:desc_end].strip()
-        
-        # Se non ha trovato quantità, prova a cercare solo il numero
-        if not item['quantity']:
-            numbers = re.findall(r'\b\d+\b', line)
-            if numbers:
-                item['quantity'] = numbers[0]
-        
-        return item
     
     def convert_to_internal_codes(self, order_data):
         """Converte i codici cliente in codici interni"""
