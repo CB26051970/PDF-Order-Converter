@@ -23,7 +23,7 @@ class PDFToExcelConverter:
             return False
     
     def extract_data_from_pdf(self, pdf_path):
-        """Estrae i dati dal PDF con parser migliorato"""
+        """Estrae i dati dal PDF"""
         try:
             with pdfplumber.open(pdf_path) as pdf:
                 all_text = ""
@@ -32,20 +32,13 @@ class PDFToExcelConverter:
                     if text:
                         all_text += text + "\n"
                 
-                # SALVA IL TESTO ESTRATTO PER DEBUG
-                debug_file = pdf_path.replace('.pdf', '_debug.txt')
-                with open(debug_file, 'w', encoding='utf-8') as f:
-                    f.write("=== TESTO ESTRATTO DAL PDF ===\n")
-                    f.write(all_text)
-                print(f"Testo estratto salvato in: {debug_file}")
-                
                 return self.smart_table_parser(all_text, pdf_path)
         except Exception as e:
             print(f"Errore nell'estrazione dal PDF: {e}")
             return None
     
     def smart_table_parser(self, text, pdf_path):
-        """Parser intelligente per diversi formati"""
+        """Parser per formato tabellare"""
         data = {
             'po_number': '',
             'po_date': '',
@@ -69,15 +62,15 @@ class PDFToExcelConverter:
         
         print(f"Analizzando ordine {data['po_number']}...")
         
-        # Prova diversi metodi di estrazione
-        items = self.extract_items_robust(text)
+        # Estrai articoli
+        items = self.extract_items_working_version(text)
         data['items'] = items
         
         print(f"Trovati {len(items)} articoli")
         return data
     
-    def extract_items_robust(self, text):
-        """Metodo robusto per estrarre articoli - VERSIONE FUNZIONANTE"""
+    def extract_items_working_version(self, text):
+        """Versione che funziona - con fix per GSD CO2"""
         items = []
         lines = text.split('\n')
         
@@ -90,10 +83,8 @@ class PDFToExcelConverter:
                 i += 1
                 continue
                 
-            # Se la riga inizia con *, è l'inizio di un articolo
             if line.startswith('*'):
                 merged_line = line
-                # Unisci le righe successive finché non troviamo un nuovo articolo o fine
                 j = i + 1
                 while j < len(lines):
                     next_line = lines[j].strip()
@@ -107,62 +98,85 @@ class PDFToExcelConverter:
             else:
                 i += 1
         
-        print("=== RIGHE UNITE ===")
+        print("=== ARTICOLI TROVATI ===")
         for line in merged_lines:
-            print(f"Riga: {line}")
-            item = self.parse_complete_line(line)
+            item = self.parse_item_line_working(line)
             if item and item['customer_code'] and item['quantity']:
                 items.append(item)
-                print(f"  ✓ Articolo: {item['customer_code']} - Qty: {item['quantity']} - UOM: {item['uom']}")
+                print(f"  {item['customer_code']} - Qty: {item['quantity']} - UOM: {item['uom']}")
         
         return items
     
-    def parse_complete_line(self, line):
-        """Analizza una riga completa di articolo - VERSIONE MIGLIORATA"""
+    def parse_item_line_working(self, line):
+        """Parser che funziona - con fix specifico per GSD CO2"""
         item = {'customer_code': '', 'description': '', 'quantity': '', 'uom': ''}
         
         # Cerca codice articolo
-        code_match = re.search(r'(\*\d+\w*)', line)
-        if code_match:
-            item['customer_code'] = code_match.group(1)
-            # Rimuovi il codice dalla riga per analizzare il resto
-            line_after_code = line[code_match.end():].strip()
-            
-            # Pattern migliorato per quantità e UOM
-            # Cerca: descrizione quantità UOM €prezzo...
-            pattern = r'(.*?)\s+(\d+)\s+([^\s€]+?)\s+€'
-            match = re.search(pattern, line_after_code)
-            
-            if match:
-                item['description'] = match.group(1).strip()
-                item['quantity'] = match.group(2)
-                item['uom'] = match.group(3)
-            else:
-                # Pattern alternativo per casi particolari (come GSD CO2)
-                # Cerca qualsiasi numero che sia la quantità
-                words = line_after_code.split()
-                for i, word in enumerate(words):
-                    if word.isdigit():
-                        item['quantity'] = word
-                        item['description'] = ' '.join(words[:i]).strip()
-                        if i + 1 < len(words):
-                            item['uom'] = words[i + 1]
-                        break
+        code_match = re.search(r'(\*\d+)', line)
+        if not code_match:
+            return item
+        
+        item['customer_code'] = code_match.group(1)
+        remaining = line[code_match.end():].strip()
+        
+        # FIX PER GSD CO2: Se è GSD CO2 Tank, gestisci separatamente
+        if '*274051' in line or 'GSD CO2 Tank' in line:
+            return self.parse_gsd_co2_line(line)
+        
+        # Pattern normale per tutti gli altri articoli
+        # Cerca: descrizione quantità UOM €prezzo
+        pattern = r'(.*?)\s+(\d+)\s+([^\s€]+?)\s+€'
+        match = re.search(pattern, remaining)
+        
+        if match:
+            item['description'] = match.group(1).strip()
+            item['quantity'] = match.group(2)
+            item['uom'] = match.group(3)
+        else:
+            # Pattern alternativo
+            words = remaining.split()
+            for i, word in enumerate(words):
+                if word.isdigit() and i > 0:  # Non il primo word dopo il codice
+                    item['quantity'] = word
+                    item['description'] = ' '.join(words[:i]).strip()
+                    if i + 1 < len(words):
+                        item['uom'] = words[i + 1]
+                    break
         
         # Pulisci la descrizione
         item['description'] = self.clean_description(item['description'])
         
         return item
     
+    def parse_gsd_co2_line(self, line):
+        """Parser specifico per GSD CO2 Tank"""
+        item = {'customer_code': '*274051', 'description': 'GSD CO2 Tank 10kg', 'quantity': '', 'uom': ''}
+        
+        # Pattern per GSD CO2: *274051 ... 12 10 Kilogram €13,14...
+        pattern = r'.*?(\d+)\s+10\s+Kilogram\s+€'
+        match = re.search(pattern, line)
+        
+        if match:
+            item['quantity'] = match.group(1)
+            item['uom'] = '10 Kilogram'
+        else:
+            # Pattern alternativo
+            numbers = re.findall(r'\b\d+\b', line)
+            if len(numbers) >= 2:
+                # Il primo numero è la quantità (12), il secondo è parte della descrizione (10)
+                item['quantity'] = numbers[0]
+                item['uom'] = '10 Kilogram'
+        
+        return item
+    
     def clean_description(self, description):
-        """Pulisce la descrizione rimuovendo parti ripetute"""
+        """Pulisce la descrizione"""
         if not description:
             return ""
         
-        # Rimuovi parti ripetute (es: "Juice Liter Apple Juice Liter Apple")
+        # Rimuovi parti ripetute
         words = description.split()
         if len(words) > 3:
-            # Cerca sequenze ripetute
             for i in range(1, len(words) // 2 + 1):
                 if words[:i] == words[i:2*i]:
                     return ' '.join(words[:i])
@@ -192,7 +206,6 @@ class PDFToExcelConverter:
         """Crea il file Excel di output"""
         try:
             with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-                # Prepara i dati per il DataFrame
                 df_data = []
                 for item in converted_items:
                     df_data.append({
@@ -209,24 +222,20 @@ class PDFToExcelConverter:
                 workbook = writer.book
                 worksheet = writer.sheets['Ordine']
                 
-                # Intestazione
                 worksheet['A1'] = f"NUMERO ORDINE: {order_data['po_number']}"
                 worksheet['A2'] = f"DATA ORDINE: {order_data['po_date']}"
                 worksheet['A3'] = f"DATA CONSEGNA: {order_data['delivery_date']}"
                 worksheet['A4'] = f"FORNITORE: {order_data.get('supplier', '')}"
                 worksheet['A5'] = f"TOTALE ARTICOLI: {len(converted_items)}"
                 
-                # Stile per l'intestazione
                 for row in range(1, 6):
                     worksheet[f'A{row}'].font = Font(bold=True)
                 
-                # Stile per i codici nuovi
                 for row in range(7, len(converted_items) + 7):
                     cell_value = worksheet[f'A{row}'].value
                     if cell_value == "**NEW**":
                         worksheet[f'A{row}'].font = Font(bold=True, color="FF0000")
                 
-                # Larghezza colonne
                 column_widths = {'A': 15, 'B': 12, 'C': 40, 'D': 15, 'E': 15}
                 for col, width in column_widths.items():
                     worksheet.column_dimensions[col].width = width
@@ -275,7 +284,6 @@ class PDFToExcelConverter:
         if not self.load_conversion_db(conversion_db_path):
             return False
         
-        # Input dati ordine usando dialoghi grafici
         po_number = simpledialog.askstring("Inserimento Ordine", "Numero Ordine (PO):")
         if not po_number:
             return False
@@ -300,7 +308,6 @@ class PDFToExcelConverter:
             'items': []
         }
         
-        # Input articoli
         while True:
             add_more = messagebox.askyesno("Inserimento Articoli", "Aggiungere un articolo?")
             if not add_more:
@@ -325,7 +332,6 @@ class PDFToExcelConverter:
             print("Nessun articolo inserito")
             return False
         
-        # Conversione e creazione Excel
         converted_items = self.convert_to_internal_codes(order_data)
         
         output_path = os.path.join(output_dir, f"MANUALE_{po_number}_converted.xlsx")
@@ -344,9 +350,8 @@ def main():
     converter = PDFToExcelConverter()
     
     root = tk.Tk()
-    root.withdraw()  # Nasconde la finestra principale
+    root.withdraw()
     
-    # Scelta tra conversione PDF e inserimento manuale
     choice = messagebox.askquestion(
         "Selezione Modalità",
         "Scegli la modalità:\n\nSì = Converti PDF automaticamente\nNo = Inserimento manuale ordine",
@@ -367,7 +372,6 @@ def main():
         output_dir = os.getcwd()
     
     if choice == 'yes':
-        # Conversione automatica PDF
         print("\nSeleziona i file PDF degli ordini da convertire")
         pdf_files = filedialog.askopenfilenames(
             title="Seleziona i file PDF degli ordini",
@@ -391,7 +395,6 @@ def main():
                            f"Output salvato in: {output_dir}")
     
     else:
-        # Inserimento manuale
         if converter.manual_order_entry(conversion_file, output_dir):
             messagebox.showinfo("Ordine Creato", 
                                f"Ordine manuale creato con successo!\n"
