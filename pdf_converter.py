@@ -1,7 +1,7 @@
 import pandas as pd
 import pdfplumber
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 import os
 import re
 from openpyxl.styles import Font
@@ -277,11 +277,22 @@ class PDFToExcelConverter:
         if not self.load_conversion_db(conversion_db_path):
             return False
         
-        # Input dati ordine
-        po_number = input("Numero Ordine (PO): ").strip()
-        po_date = input("Data Ordine (dd/mm/yyyy): ").strip()
-        delivery_date = input("Data Consegna (dd/mm/yyyy): ").strip()
-        supplier = input("Fornitore: ").strip()
+        # Input dati ordine usando dialoghi grafici
+        po_number = simpledialog.askstring("Inserimento Ordine", "Numero Ordine (PO):")
+        if not po_number:
+            return False
+            
+        po_date = simpledialog.askstring("Inserimento Ordine", "Data Ordine (dd/mm/yyyy):")
+        if not po_date:
+            return False
+            
+        delivery_date = simpledialog.askstring("Inserimento Ordine", "Data Consegna (dd/mm/yyyy):")
+        if not delivery_date:
+            return False
+            
+        supplier = simpledialog.askstring("Inserimento Ordine", "Fornitore:")
+        if not supplier:
+            return False
         
         order_data = {
             'po_number': po_number,
@@ -292,22 +303,24 @@ class PDFToExcelConverter:
         }
         
         # Input articoli
-        print("\nInserisci gli articoli (lascia codice vuoto per terminare):")
         while True:
-            print(f"\nArticolo {len(order_data['items']) + 1}:")
-            customer_code = input("Codice Cliente (es: *274077): ").strip()
-            if not customer_code:
+            add_more = messagebox.askyesno("Inserimento Articoli", "Aggiungere un articolo?")
+            if not add_more:
                 break
             
-            quantity = input("Quantità: ").strip()
-            description = input("Descrizione: ").strip()
-            uom = input("UOM (es: 12 x 50cl): ").strip()
+            customer_code = simpledialog.askstring("Articolo", "Codice Cliente (es: *274077):")
+            if not customer_code:
+                continue
+                
+            quantity = simpledialog.askstring("Articolo", "Quantità:")
+            description = simpledialog.askstring("Articolo", "Descrizione:")
+            uom = simpledialog.askstring("Articolo", "UOM (es: 12 x 50cl):")
             
             order_data['items'].append({
                 'customer_code': customer_code,
-                'quantity': quantity,
-                'description': description,
-                'uom': uom
+                'quantity': quantity or '',
+                'description': description or '',
+                'uom': uom or ''
             })
         
         if not order_data['items']:
@@ -324,7 +337,8 @@ class PDFToExcelConverter:
             print(f"\nOrdine manuale creato: {output_path}")
             new_codes = sum(1 for item in converted_items if item['internal_code'] == "**NEW**")
             if new_codes > 0:
-                print(f"ATTENZIONE: {new_codes} codici senza corrispondenza trovati")
+                messagebox.showwarning("Codici Non Trovati", 
+                                     f"ATTENZIONE: {new_codes} codici senza corrispondenza trovati")
         
         return success
 
@@ -332,15 +346,16 @@ def main():
     converter = PDFToExcelConverter()
     
     root = tk.Tk()
-    root.withdraw()
+    root.withdraw()  # Nasconde la finestra principale
     
-    print("=== CONVERTITORE PDF ORDINI FORNITORI ===")
-    print("1. Converti PDF automaticamente")
-    print("2. Inserimento manuale ordine")
+    # Scelta tra conversione PDF e inserimento manuale
+    choice = messagebox.askquestion(
+        "Selezione Modalità",
+        "Scegli la modalità:\n\nSì = Converti PDF automaticamente\nNo = Inserimento manuale ordine",
+        icon='question'
+    )
     
-    choice = input("\nScegli opzione (1 o 2): ").strip()
-    
-    print("\nSeleziona il file DB CONVERSION.xlsx")
+    print("Seleziona il file DB CONVERSION.xlsx")
     conversion_file = filedialog.askopenfilename(
         title="Seleziona il file DB CONVERSION.xlsx",
         filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")]
@@ -353,7 +368,7 @@ def main():
     if not output_dir:
         output_dir = os.getcwd()
     
-    if choice == "1":
+    if choice == 'yes':
         # Conversione automatica PDF
         print("\nSeleziona i file PDF degli ordini da convertire")
         pdf_files = filedialog.askopenfilenames(
@@ -377,7 +392,7 @@ def main():
                            f"Elaborati {success_count}/{len(pdf_files)} file.\n"
                            f"Output salvato in: {output_dir}")
     
-    elif choice == "2":
+    else:
         # Inserimento manuale
         if converter.manual_order_entry(conversion_file, output_dir):
             messagebox.showinfo("Ordine Creato", 
@@ -385,6 +400,8 @@ def main():
                                f"Output salvato in: {output_dir}")
         else:
             messagebox.showerror("Errore", "Errore nella creazione dell'ordine manuale")
+    
+    root.destroy()
 
 if __name__ == "__main__":
     main()
