@@ -92,7 +92,8 @@ class PDFToExcelConverter:
                 break
         
         if table_start == -1:
-            return items
+            # Se non trova l'header, cerca direttamente i codici articolo
+            return self.find_items_by_codes(lines)
         
         # Trova la fine della tabella
         for i in range(table_start, len(lines)):
@@ -109,6 +110,19 @@ class PDFToExcelConverter:
             item = self.parse_item_line(line)
             if item and item['customer_code']:
                 items.append(item)
+        
+        return items
+    
+    def find_items_by_codes(self, lines):
+        """Trova articoli cercando direttamente i codici che iniziano con *"""
+        items = []
+        
+        for i, line in enumerate(lines):
+            line = line.strip()
+            if line.startswith('*'):
+                item = self.parse_item_line_advanced(line, lines, i)
+                if item and item['customer_code']:
+                    items.append(item)
         
         return items
     
@@ -150,6 +164,53 @@ class PDFToExcelConverter:
                     item['uom'] = words[i + 1]
                     item['description'] = ' '.join(words[:i]).strip()
                     break
+        
+        # Pulisci la descrizione
+        item['description'] = self.clean_description(item['description'])
+        
+        return item
+    
+    def parse_item_line_advanced(self, line, all_lines, current_index):
+        """Parser avanzato per formati complessi come Word"""
+        item = {'customer_code': '', 'description': '', 'quantity': '', 'uom': ''}
+        
+        # Estrai codice
+        code_match = re.search(r'(\*\d+\w*)', line)
+        if not code_match:
+            return item
+        
+        item['customer_code'] = code_match.group(1)
+        remaining = line[code_match.end():].strip()
+        
+        # Cerca pattern specifico per formato Word/tabella
+        # Pattern: *codice descrizione quantità UOM prezzo...
+        patterns = [
+            # Pattern per formato Word con tabelle
+            r'(\*\d+\w*)\s+(.*?)\s+(\d+)\s+([^\s€]+?)\s+€',
+            # Pattern più generico
+            r'(\*\d+\w*)\s+(.*?)\s+(\d+)\s+([^\s€]+)',
+            # Pattern solo quantità
+            r'(\*\d+\w*)\s+(.*?)\s+(\d+)'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, line)
+            if match:
+                item['customer_code'] = match.group(1)
+                item['description'] = match.group(2).strip()
+                item['quantity'] = match.group(3)
+                if len(match.groups()) >= 4:
+                    item['uom'] = match.group(4)
+                break
+        
+        # Se non trova con i pattern, prova a cercare nella riga successiva
+        if not item['quantity'] and current_index + 1 < len(all_lines):
+            next_line = all_lines[current_index + 1].strip()
+            # Cerca quantità nella riga successiva
+            qty_match = re.search(r'^\s*(\d+)\s+([^\s€]+)', next_line)
+            if qty_match:
+                item['quantity'] = qty_match.group(1)
+                item['uom'] = qty_match.group(2)
         
         # Pulisci la descrizione
         item['description'] = self.clean_description(item['description'])
