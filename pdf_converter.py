@@ -32,13 +32,20 @@ class PDFToExcelConverter:
                     if text:
                         all_text += text + "\n"
                 
+                # SALVA IL TESTO ESTRATTO PER DEBUG
+                debug_file = pdf_path.replace('.pdf', '_debug.txt')
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write("=== TESTO ESTRATTO DAL PDF ===\n")
+                    f.write(all_text)
+                print(f"Testo estratto salvato in: {debug_file}")
+                
                 return self.smart_table_parser(all_text, pdf_path)
         except Exception as e:
             print(f"Errore nell'estrazione dal PDF: {e}")
             return None
     
     def smart_table_parser(self, text, pdf_path):
-        """Parser semplificato per formato tabellare"""
+        """Parser intelligente per diversi formati"""
         data = {
             'po_number': '',
             'po_date': '',
@@ -62,56 +69,105 @@ class PDFToExcelConverter:
         
         print(f"Analizzando ordine {data['po_number']}...")
         
-        # Estrai articoli con metodo semplificato
-        items = self.extract_items_from_text_simple(text)
+        # Prova diversi metodi di estrazione
+        items = self.extract_items_robust(text)
         data['items'] = items
         
         print(f"Trovati {len(items)} articoli")
         return data
     
-    def extract_items_from_text_simple(self, text):
-        """Estrae articoli con metodo semplice e affidabile - VERSIONE MIGLIORATA"""
+    def extract_items_robust(self, text):
+        """Metodo robusto per estrarre articoli - VERSIONE FUNZIONANTE"""
         items = []
         lines = text.split('\n')
         
-        for line in lines:
-            line = line.strip()
-            
-            # Salta righe non rilevanti
-            if (not line or 
-                line.startswith('Codice') or 
-                line.startswith('Item Code') or
-                'Descrizione' in line or
-                'QTY' in line or
-                'Total' in line or
-                'Delivery' in line or
-                'Note:' in line):
+        # Unisci righe spezzate
+        merged_lines = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line:
+                i += 1
                 continue
                 
-            # Dividi per 2+ spazi
-            columns = re.split(r'\s{2,}', line)
-            
-            # Deve avere almeno 4 colonne: Codice, Descrizione, QTY, UOM
-            if len(columns) >= 4:
-                # Prendi solo le prime 4 colonne
-                code_col = columns[0].strip()
-                desc_col = columns[1].strip()
-                qty_col = columns[2].strip()
-                uom_col = columns[3].strip()
+            # Se la riga inizia con *, è l'inizio di un articolo
+            if line.startswith('*'):
+                merged_line = line
+                # Unisci le righe successive finché non troviamo un nuovo articolo o fine
+                j = i + 1
+                while j < len(lines):
+                    next_line = lines[j].strip()
+                    if not next_line or next_line.startswith('*') or 'Delivery to:' in next_line or 'Total' in next_line:
+                        break
+                    merged_line += " " + next_line
+                    j += 1
                 
-                # Verifica che la quantità sia numerica e il codice sia valido
-                # MODIFICA: Accetta anche "12" come quantità (per GSD CO2)
-                if (qty_col.isdigit() or qty_col == '12') and (code_col.isdigit() or code_col.startswith('*')):
-                    item = {
-                        'customer_code': f"*{code_col}" if not code_col.startswith('*') else code_col,
-                        'description': desc_col,
-                        'quantity': qty_col,
-                        'uom': uom_col
-                    }
-                    items.append(item)
-                    print(f"  Articolo: {item['customer_code']} - Qty: {item['quantity']} - UOM: {item['uom']}")
+                merged_lines.append(merged_line)
+                i = j
+            else:
+                i += 1
+        
+        print("=== RIGHE UNITE ===")
+        for line in merged_lines:
+            print(f"Riga: {line}")
+            item = self.parse_complete_line(line)
+            if item and item['customer_code'] and item['quantity']:
+                items.append(item)
+                print(f"  ✓ Articolo: {item['customer_code']} - Qty: {item['quantity']} - UOM: {item['uom']}")
         
         return items
+    
+    def parse_complete_line(self, line):
+        """Analizza una riga completa di articolo - VERSIONE MIGLIORATA"""
+        item = {'customer_code': '', 'description': '', 'quantity': '', 'uom': ''}
+        
+        # Cerca codice articolo
+        code_match = re.search(r'(\*\d+\w*)', line)
+        if code_match:
+            item['customer_code'] = code_match.group(1)
+            # Rimuovi il codice dalla riga per analizzare il resto
+            line_after_code = line[code_match.end():].strip()
+            
+            # Pattern migliorato per quantità e UOM
+            # Cerca: descrizione quantità UOM €prezzo...
+            pattern = r'(.*?)\s+(\d+)\s+([^\s€]+?)\s+€'
+            match = re.search(pattern, line_after_code)
+            
+            if match:
+                item['description'] = match.group(1).strip()
+                item['quantity'] = match.group(2)
+                item['uom'] = match.group(3)
+            else:
+                # Pattern alternativo per casi particolari (come GSD CO2)
+                # Cerca qualsiasi numero che sia la quantità
+                words = line_after_code.split()
+                for i, word in enumerate(words):
+                    if word.isdigit():
+                        item['quantity'] = word
+                        item['description'] = ' '.join(words[:i]).strip()
+                        if i + 1 < len(words):
+                            item['uom'] = words[i + 1]
+                        break
+        
+        # Pulisci la descrizione
+        item['description'] = self.clean_description(item['description'])
+        
+        return item
+    
+    def clean_description(self, description):
+        """Pulisce la descrizione rimuovendo parti ripetute"""
+        if not description:
+            return ""
+        
+        # Rimuovi parti ripetute (es: "Juice Liter Apple Juice Liter Apple")
+        words = description.split()
+        if len(words) > 3:
+            # Cerca sequenze ripetute
+            for i in range(1, len(words) // 2 + 1):
+                if words[:i] == words[i:2*i]:
+                    return ' '.join(words[:i])
+        
+        return description.strip()
     
     def convert_to_internal_codes(self, order_data):
         """Converte i codici cliente in codici interni"""
